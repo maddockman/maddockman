@@ -1,0 +1,72 @@
+#!/bin/zsh
+# reap-zombies — remove defunct (zombie) processes by terminating their parents.
+#
+# Zombies cannot be killed directly; they disappear once the parent exits
+# (or reaps them). This script groups zombies by parent, shows the parents,
+# and asks before sending SIGTERM to each one.
+#
+# Usage:
+#   reap-zombies          # interactive: list and confirm
+#   reap-zombies -y       # no prompt, terminate all parents
+#   reap-zombies -n       # dry run, list only
+
+set -u
+
+yes=0
+dry=0
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) yes=1 ;;
+    -n|--dry-run) dry=1 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# parent_pid<TAB>zombie_count, sorted by count desc
+parents=$(ps -axo ppid,stat | awk 'NR>1 && $2 ~ /^Z/ {c[$1]++} END {for (p in c) print p "\t" c[p]}' | sort -t$'\t' -k2,2rn)
+
+if [[ -z "$parents" ]]; then
+  echo "No zombie processes found."
+  exit 0
+fi
+
+total=$(echo "$parents" | awk -F'\t' '{s+=$2} END {print s}')
+echo "Found $total zombie process(es) under these parents:"
+echo
+printf "%-8s %-8s %s\n" "ZOMBIES" "PPID" "PARENT COMMAND"
+while IFS=$'\t' read -r ppid count; do
+  cmd=$(ps -o command= -p "$ppid" 2>/dev/null)
+  printf "%-8s %-8s %s\n" "$count" "$ppid" "${cmd:-<gone>}"
+done <<< "$parents"
+echo
+
+if (( dry )); then
+  exit 0
+fi
+
+if (( ! yes )); then
+  read -q "REPLY?Send SIGTERM to these parent processes? [y/N] " || { echo; echo "Aborted."; exit 1; }
+  echo
+fi
+
+while IFS=$'\t' read -r ppid count; do
+  if (( ppid == 1 )); then
+    echo "Skipping PID 1 (launchd); its zombies are reaped automatically."
+    continue
+  fi
+  if kill "$ppid" 2>/dev/null; then
+    echo "Sent SIGTERM to $ppid"
+  else
+    echo "Could not signal $ppid (already gone or permission denied)" >&2
+  fi
+done <<< "$parents"
+
+sleep 2
+left=$(ps -axo stat | awk 'NR>1 && $1 ~ /^Z/' | wc -l | tr -d ' ')
+echo
+echo "Zombies remaining: $left"
+if (( left > 0 )); then
+  echo "Some parents may need SIGKILL or a restart of the owning app." >&2
+  exit 1
+fi
